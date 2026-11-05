@@ -270,9 +270,7 @@ static bool mount_ro(void)
         return false;
     }
     g_mounted = true;
-    char label[16] = "";
-    fatGetVolumeLabel("usb", label);
-    printf("Mounted as usb:/ READ-ONLY, label='%s'\n", label);
+    printf("Mounted as usb:/ READ-ONLY\n");
 
     struct statvfs sv;
     if (statvfs("usb:/", &sv) == 0) {
