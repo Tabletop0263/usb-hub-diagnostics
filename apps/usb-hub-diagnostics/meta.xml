@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<app version="1">
+  <name>USB Hub Diagnostics</name>
+  <coder>Phorosix</coder>
+  <version>0.1</version>
+  <release_date>20261104000000</release_date>
+  <short_description>Read-only USB hub / SD reader diagnostics</short_description>
+  <long_description>Enumerates USB devices, interfaces and endpoints, probes mass-storage LUNs, mounts FAT read-only and runs read-only benchmarks. Never writes to any storage.</long_description>
+</app>

@@ -1,0 +1,19 @@
+name: Build USB Hub Diagnostics
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitppc:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build boot.dol
+        run: make
+      - name: Stage HBC folder
+        run: |
+          mkdir -p out/apps/usb-hub-diagnostics
+          cp boot.dol out/apps/usb-hub-diagnostics/boot.dol
+          cp apps/usb-hub-diagnostics/meta.xml apps/usb-hub-diagnostics/icon.png out/apps/usb-hub-diagnostics/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: usb-hub-diagnostics
+          path: out/
