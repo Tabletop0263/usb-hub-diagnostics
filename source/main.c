@@ -70,14 +70,30 @@ static void video_init(void)
 
 static void quit(void) { SYS_ResetSystem(SYS_RETURNTOMENU, 0, 0); }
 
+#define BTN_A    1
+#define BTN_B    2
+#define BTN_HOME 4
+/* Wiimote 1 (A/B/HOME) or any GameCube pad port 1-4 (A/B/START) */
+static int poll_btn(void)
+{
+    WPAD_ScanPads();
+    PAD_ScanPads();
+    u32 w = WPAD_ButtonsDown(0), g = 0;
+    for (int i = 0; i < 4; i++) g |= PAD_ButtonsDown(i);
+    int r = 0;
+    if ((w & WPAD_BUTTON_A) || (g & PAD_BUTTON_A)) r |= BTN_A;
+    if ((w & WPAD_BUTTON_B) || (g & PAD_BUTTON_B)) r |= BTN_B;
+    if ((w & WPAD_BUTTON_HOME) || (g & PAD_BUTTON_START)) r |= BTN_HOME;
+    return r;
+}
+
 static void wait_a(const char *msg)
 {
-    printf("\n-- %s (A=continue, HOME=exit) --\n", msg);
+    printf("\n-- %s (A=continue, HOME/START=exit) --\n", msg);
     for (;;) {
-        WPAD_ScanPads();
-        u32 d = WPAD_ButtonsDown(0);
-        if (d & WPAD_BUTTON_HOME) quit();
-        if (d & WPAD_BUTTON_A) break;
+        int d = poll_btn();
+        if (d & BTN_HOME) quit();
+        if (d & BTN_A) break;
         VIDEO_WaitVSync();
     }
 }
@@ -453,11 +469,10 @@ static void save_log(void)
     printf("Existing files are never modified.\n");
     printf("\nA = save    B = skip\n");
     for (;;) {
-        WPAD_ScanPads();
-        u32 d = WPAD_ButtonsDown(0);
-        if (d & WPAD_BUTTON_HOME) quit();
-        if (d & WPAD_BUTTON_B) return;
-        if (d & WPAD_BUTTON_A) break;
+        int d = poll_btn();
+        if (d & BTN_HOME) quit();
+        if (d & BTN_B) return;
+        if (d & BTN_A) break;
         VIDEO_WaitVSync();
     }
     if (g_mounted) { fatUnmount("usb"); g_mounted = false; }
@@ -484,6 +499,7 @@ int main(void)
 {
     video_init();
     WPAD_Init();
+    PAD_Init();
 
     page("Overview");
     printf("Read-only, except an optional log save you confirm at the end.\n");
