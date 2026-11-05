@@ -58,9 +58,10 @@ static void video_init(void)
     VIDEO_Init();
     rmode = VIDEO_GetPreferredMode(NULL);
     xfb = MEM_K0_TO_K1(SYS_AllocateFramebuffer(rmode));
+    VIDEO_Configure(rmode);
+    VIDEO_ClearFrameBuffer(rmode, xfb, COLOR_BLACK);   /* console_init does NOT clear */
     console_init(xfb, 20, 20, rmode->fbWidth - 40, rmode->xfbHeight - 40,
                  rmode->fbWidth * VI_DISPLAY_PIX_SZ);
-    VIDEO_Configure(rmode);
     VIDEO_SetNextFramebuffer(xfb);
     VIDEO_SetBlack(FALSE);
     VIDEO_Flush();
@@ -94,8 +95,17 @@ static void wait_a(const char *msg)
         int d = poll_btn();
         if (d & BTN_HOME) quit();
         if (d & BTN_A) break;
+        static u32 tick;
+        if ((++tick % 30) == 0) {
+            u32 wt = 0;
+            int wp = WPAD_Probe(0, &wt);
+            u32 gm = PAD_ScanPads();
+            fprintf(stdout, "\r wiimote:%s  gcpad-mask:%x  alive:%us ",
+                    wp == WPAD_ERR_NONE ? "yes" : "NO", (unsigned)gm, (unsigned)(tick / 30));
+        }
         VIDEO_WaitVSync();
     }
+    fputs("\n", stdout);
 }
 
 static void page(const char *title)
