@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <malloc.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -25,8 +26,28 @@
 #include <wiiuse/wpad.h>
 
 #define MAX_DEV   32
+#define LOG_MAX   (96 * 1024)
+#define LOG_NAME  "usb_diag_log"
 #define CHUNK_SEC 128           /* 64 KiB at 512 B/sector */
 #define MAX_FILES 400
+
+static char logbuf[LOG_MAX];
+static u32 loglen;
+static int lp(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int r = vprintf(fmt, ap);
+    va_end(ap);
+    if (fmt[0] != 0x1b && loglen < LOG_MAX - 512) {
+        va_start(ap, fmt);
+        int n = vsnprintf(logbuf + loglen, 512, fmt, ap);
+        va_end(ap);
+        if (n > 0) loglen += (n > 511) ? 511 : n;
+    }
+    return r;
+}
+#define printf lp
 
 static GXRModeObj *rmode;
 static void *xfb;
@@ -423,6 +444,41 @@ static void bench(void)
     free(buf);
 }
 
+/* Optional log save: creates ONE NEW file, never overwrites anything. */
+static void save_log(void)
+{
+    page("Save log");
+    printf("Save this session's log to the USB card?\n");
+    printf("Creates a NEW file %s_N.txt at the card root.\n", LOG_NAME);
+    printf("Existing files are never modified.\n");
+    printf("\nA = save    B = skip\n");
+    for (;;) {
+        WPAD_ScanPads();
+        u32 d = WPAD_ButtonsDown(0);
+        if (d & WPAD_BUTTON_HOME) quit();
+        if (d & WPAD_BUTTON_B) return;
+        if (d & WPAD_BUTTON_A) break;
+        VIDEO_WaitVSync();
+    }
+    if (g_mounted) { fatUnmount("usb"); g_mounted = false; }
+    if (!fatMountSimple("usbw", &__io_usbstorage)) { printf("Cannot mount USB read/write; log not saved.\n"); return; }
+    char path[64];
+    int n;
+    for (n = 0; n < 100; n++) {
+        snprintf(path, sizeof(path), "usbw:/%s_%d.txt", LOG_NAME, n);
+        FILE *t = fopen(path, "rb");
+        if (!t) break;
+        fclose(t);
+    }
+    if (n == 100) { printf("100 logs already exist; not saving.\n"); fatUnmount("usbw"); return; }
+    FILE *f = fopen(path, "wb");
+    if (!f) { printf("Cannot create %s (card write-protected?)\n", path); fatUnmount("usbw"); return; }
+    size_t w = fwrite(logbuf, 1, loglen, f);
+    fclose(f);
+    fatUnmount("usbw");
+    printf("Saved %u of %u bytes to %s\n", (unsigned)w, (unsigned)loglen, path);
+}
+
 /* ------------------------------------------------------------- main */
 int main(void)
 {
@@ -430,7 +486,7 @@ int main(void)
     WPAD_Init();
 
     page("Overview");
-    printf("READ-ONLY tool. Nothing is written, formatted or installed.\n");
+    printf("Read-only, except an optional log save you confirm at the end.\n");
     printf("IOS in use: %d (IOS58 recommended: provides /dev/usb/ven, USB 2.0)\n", IOS_GetVersion());
     printf("Plug the hub in BEFORE launching. Remove SD from the Wii front\n"
            "slot if you want unambiguous results (HBC may be booting from it).\n");
@@ -445,7 +501,9 @@ int main(void)
         wait_a("next: benchmarks");
         bench();
         fatUnmount("usb");
+        g_mounted = false;
     }
+    save_log();
     ro_shutdown();
     wait_a("finished - HOME to exit");
     quit();
