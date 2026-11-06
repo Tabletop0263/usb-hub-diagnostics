@@ -20,6 +20,7 @@
 #include <gccore.h>
 #include <fat.h>
 #include <ogc/usb.h>
+#include "vrec.h"
 #include <ogc/usbstorage.h>
 #include <ogc/disc_io.h>
 #include <ogc/lwp_watchdog.h>
@@ -470,6 +471,146 @@ static void bench(void)
     free(buf);
 }
 
+/* ---------- 5. Recording feasibility: write speed + encoder speed + real .wvr ---------- */
+static u32 lcg = 12345;
+static u32 rnd(void) { lcg = lcg * 1664525u + 1013904223u; return lcg >> 16; }
+
+/* synthetic 640x480 YCbYCr frame: static gradient + moving box (+ optional full-frame change) */
+static void gen_frame(u8 *x, int f, int full)
+{
+    for (int y = 0; y < 480; y++)
+        for (int p = 0; p < 320; p++) {
+            u8 *q = x + y * 1280 + p * 4;
+            int sh = full ? f : 0;
+            int Y0 = 16 + (p * 2 + sh) % 200;
+            int U = 128 + (y / 4), V = 128 - (p / 8);
+            int bx = 100 + (f * 7) % 400, by = 80 + (f * 5) % 300;
+            if (abs(p * 2 - bx) < 40 && abs(y - by) < 30) { Y0 = 235; U = 90; V = 240; }
+            q[0] = Y0; q[1] = U; q[2] = Y0 + 1; q[3] = V;
+        }
+}
+
+static void write_test(void)
+{
+    const char *path = "usbw:/wvr_writetest.tmp";
+    printf("[F] Sequential WRITE, 32 MiB in 128 KiB chunks\n");
+    FILE *t = fopen(path, "rb");
+    if (t) { fclose(t); printf("    %s already exists; not touching it. Skipped.\n", path); return; }
+    u8 *buf = memalign(32, 131072);
+    if (!buf) { printf("    OOM\n"); return; }
+    for (int i = 0; i < 131072; i++) buf[i] = rnd();
+    FILE *f = fopen(path, "wb");
+    if (!f) { printf("    cannot create temp file (write-protected?)\n"); free(buf); return; }
+    u32 maxms = 0, slow = 0, werr = 0;
+    u64 t0 = gettime();
+    for (int i = 0; i < 256; i++) {
+        u64 c0 = gettime();
+        if (fwrite(buf, 1, 131072, f) != 131072) { werr++; break; }
+        u32 ms = ms_since(c0);
+        if (ms > maxms) maxms = ms;
+        if (ms > 100) slow++;
+    }
+    fflush(f);
+    fclose(f);
+    u32 total = ms_since(t0);
+    print_rate("write 32MiB", 32ull * 1048576, total, werr);
+    printf("    slowest chunk %u ms, chunks >100 ms: %u/256\n", maxms, slow);
+    printf("    (includes final flush; this is real media write speed)\n");
+    remove(path);
+    printf("    temp file removed.\n");
+    free(buf);
+}
+
+static void enc_bench(void)
+{
+    printf("\n[G] Encoder CPU speed on the Wii (synthetic 640x480 input)\n");
+    u8 *x = memalign(32, 640 * 480 * 2);
+    if (!x) { printf("    OOM\n"); return; }
+    static const char *nm[] = {"box only", "full change"};
+    for (int full = 0; full < 2; full++)
+        for (int sc = 1; sc <= 2; sc++) {
+            vrec_enc e;
+            if (vrec_init(&e, 640, 480, sc, 0, 30, 1)) { printf("    init failed\n"); continue; }
+            size_t cap = vrec_max_frame_bytes(&e);
+            u8 *out = malloc(cap);
+            if (!out) { vrec_free(&e); continue; }
+            u64 enc_ticks = 0, bytes = 0;
+            for (int i = 0; i < 40; i++) {
+                gen_frame(x, i, full);
+                u64 a = gettime();
+                size_t n = vrec_encode(&e, x, 1280, i * 33, i == 0, out, cap);
+                enc_ticks += gettime() - a;
+                bytes += n;
+            }
+            double ms = ticks_to_microsecs(enc_ticks) / 1000.0 / 40.0;
+            double kb = bytes / 1024.0 / 40.0;
+            printf("    %-11s scale %d: %6.1f ms/frame (max %5.1f fps)  %6.1f KB/frame  = %.2f MiB/s @30fps\n",
+                   nm[full], sc, ms, 1000.0 / ms, kb, kb * 30.0 / 1024.0);
+            free(out); vrec_free(&e);
+        }
+    free(x);
+}
+
+static void record_test(void)
+{
+    printf("\n[H] End-to-end: encode + write 300 frames as fast as possible\n");
+    char path[64]; int n;
+    for (n = 0; n < 100; n++) {
+        snprintf(path, sizeof(path), "usbw:/wvr_test_%d.wvr", n);
+        FILE *t = fopen(path, "rb");
+        if (!t) break;
+        fclose(t);
+    }
+    if (n == 100) { printf("    100 test files exist; skipped.\n"); return; }
+    vrec_enc e;
+    if (vrec_init(&e, 640, 480, 2, 0, 30, 1)) { printf("    init failed\n"); return; }
+    size_t cap = vrec_max_frame_bytes(&e);
+    u8 *out = malloc(cap + 32), *x = memalign(32, 640 * 480 * 2);
+    FILE *f = fopen(path, "wb");
+    if (!out || !x || !f) { printf("    setup failed\n"); if (f) fclose(f); free(out); free(x); vrec_free(&e); return; }
+    fwrite(out, 1, vrec_write_header(&e, out), f);
+    u64 bytes = 32, t0 = gettime(); u32 maxf = 0, werr = 0;
+    for (int i = 0; i < 300; i++) {
+        gen_frame(x, i, 0);
+        u64 a = gettime();
+        size_t sz = vrec_encode(&e, x, 1280, (u32)(i * 1000 / 30), i % 90 == 0, out, cap);
+        if (fwrite(out, 1, sz, f) != sz) werr++;
+        u32 ms = ms_since(a); if (ms > maxf) maxf = ms;
+        bytes += sz;
+    }
+    fflush(f); fclose(f);
+    u32 total = ms_since(t0);
+    printf("    300 frames in %u ms = %.1f fps achieved, slowest frame %u ms, write errors %u\n",
+           total, 300000.0 / total, maxf, werr);
+    printf("    file %s: %.2f MiB (excl. frame generation overhead in timing)\n", path, bytes / 1048576.0);
+    printf("    Convert on PC: python3 wvr2mp4.py %s out.mp4 --upscale 2\n", path + 6);
+    free(out); free(x); vrec_free(&e);
+}
+
+static void rw_tests(void)
+{
+    page("5/5 Recording feasibility");
+    printf("Tests whether the Wii can record video to this card.\n");
+    printf("Writes: a 32 MiB temp file (deleted after) and ONE new\n");
+    printf("wvr_test_N.wvr (about 3-4 MiB). Nothing else is touched.\n");
+    printf("\nA = run    B = skip\n");
+    for (;;) {
+        int d = poll_btn();
+        if (d & BTN_HOME) quit();
+        if (d & BTN_B) return;
+        if (d & BTN_A) break;
+        VIDEO_WaitVSync();
+    }
+    if (g_mounted) { fatUnmount("usb"); g_mounted = false; }
+    if (!fatMountSimple("usbw", &__io_usbstorage)) { printf("Cannot mount USB read/write.\n"); wait_a("continue"); return; }
+    write_test();
+    enc_bench();
+    wait_a("encoder results done");
+    record_test();
+    fatUnmount("usbw");
+    wait_a("recording tests done");
+}
+
 /* Optional log save: creates ONE NEW file, never overwrites anything. */
 static void save_log(void)
 {
@@ -529,6 +670,7 @@ int main(void)
         fatUnmount("usb");
         g_mounted = false;
     }
+    rw_tests();
     save_log();
     ro_shutdown();
     wait_a("finished - HOME to exit");
