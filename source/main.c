@@ -587,12 +587,83 @@ static void record_test(void)
     free(out); free(x); vrec_free(&e);
 }
 
+/* [I] Real framebuffer capture: animate the screen, record the actual XFB */
+static void fill(int x, int y, int w, int h, u32 pair)
+{
+    u32 *fb = (u32 *)xfb;
+    for (int r = y; r < y + h; r++)
+        for (int c = x / 2; c < (x + w) / 2; c++) fb[r * 320 + c] = pair;
+}
+#define YUVP(Y, U, V) (((u32)(Y) << 24) | ((u32)(U) << 16) | ((u32)(Y) << 8) | (u32)(V))
+
+static void screen_test(void)
+{
+    wait_a("next: real screen-capture test (10 s, screen animates)");
+    char path[64]; int n;
+    for (n = 0; n < 100; n++) {
+        snprintf(path, sizeof(path), "usbw:/wvr_screen_%d.wvr", n);
+        FILE *t = fopen(path, "rb");
+        if (!t) break;
+        fclose(t);
+    }
+    if (n == 100) { printf("100 screen files exist; skipped.\n"); return; }
+    int h = rmode->xfbHeight;
+    vrec_enc e;
+    if (vrec_init(&e, 640, h, 2, 0, 30, 1)) { printf("encoder init failed\n"); return; }
+    size_t cap = vrec_max_frame_bytes(&e);
+    u8 *out = malloc(cap + 32);
+    FILE *f = fopen(path, "wb");
+    if (!out || !f) { printf("setup failed\n"); if (f) fclose(f); free(out); vrec_free(&e); return; }
+    fwrite(out, 1, vrec_write_header(&e, out), f);
+    const u8 *src = (const u8 *)MEM_K1_TO_K0(xfb);
+
+    printf("\x1b[2J\x1b[2;0H");
+    fprintf(stdout, "WVR screen capture test - recording the real framebuffer\n");
+    static const u8 bars[8][3] = {{235,128,128},{210,16,146},{170,166,16},{145,54,34},
+                                  {106,202,222},{81,90,240},{41,240,110},{16,128,128}};
+    for (int i = 0; i < 8; i++) fill(i * 80, 300, 80, 60, YUVP(bars[i][0], bars[i][1], bars[i][2]));
+
+    int px = 20, py = 120, opx = 20, opy = 120;
+    u32 frames = 0, late = 0, maxf = 0, werr = 0, next_ms = 0;
+    u64 bytes = 32, t0 = gettime();
+    for (;;) {
+        u32 t = ms_since(t0);
+        if (t >= 10000) break;
+        if (t < next_ms) { VIDEO_WaitVSync(); continue; }
+        if (t > next_ms + 40) { late++; next_ms = t; }
+        next_ms += 33;
+        u64 a = gettime();
+        u32 pos = (t / 6) % 1000; px = 20 + (pos < 500 ? pos : 1000 - pos); px &= ~1;
+        u32 q = (t / 10) % 160; py = 110 + (q < 80 ? q : 160 - q);
+        fill(opx, opy, 64, 64, COLOR_BLACK);
+        fill(px, py, 64, 64, YUVP(81, 90, 240));
+        fill((t / 4) % 560, 400, 40, 16, YUVP(235, 128, 128));
+        fill(0, 400, 0, 0, 0);
+        opx = px; opy = py;
+        fprintf(stdout, "\x1b[4;0Hframe %u   t=%u ms   ", frames, t);
+        DCInvalidateRange((void *)src, 1280 * h);
+        size_t sz = vrec_encode(&e, src, 1280, t, (frames % 90) == 0, out, cap);
+        if (fwrite(out, 1, sz, f) != sz) werr++;
+        bytes += sz;
+        u32 ms = ms_since(a); if (ms > maxf) maxf = ms;
+        frames++;
+    }
+    fflush(f); fclose(f);
+    u32 total = ms_since(t0);
+    page("Screen capture result");
+    printf("Recorded %u frames in %u ms = %.1f fps (target 30)\n", frames, total, frames * 1000.0 / total);
+    printf("Slowest frame %u ms, late frames %u, write errors %u\n", maxf, late, werr);
+    printf("File %s: %.2f MiB (%.2f MiB/s)\n", path, bytes / 1048576.0, bytes / 1048576.0 / (total / 1000.0));
+    printf("Convert on PC: python3 wvr2mp4.py %s out.mp4 --upscale 2\n", path + 6);
+    free(out); vrec_free(&e);
+}
+
 static void rw_tests(void)
 {
     page("5/5 Recording feasibility");
     printf("Tests whether the Wii can record video to this card.\n");
     printf("Writes: a 32 MiB temp file (deleted after) and ONE new\n");
-    printf("wvr_test_N.wvr (about 3-4 MiB). Nothing else is touched.\n");
+    printf("wvr_test_N.wvr and wvr_screen_N.wvr (few MiB each).\n");
     printf("\nA = run    B = skip\n");
     for (;;) {
         int d = poll_btn();
@@ -607,6 +678,7 @@ static void rw_tests(void)
     enc_bench();
     wait_a("encoder results done");
     record_test();
+    screen_test();
     fatUnmount("usbw");
     wait_a("recording tests done");
 }
